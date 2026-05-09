@@ -1,0 +1,110 @@
+id: reviewer
+namespace: hackathon.copilot
+description: Reviewer agent — runs the generated code in a sandbox, captures pass/fail.
+labels:
+  project: copilot
+  phase: "2"
+
+inputs:
+  - id: language
+    type: STRING
+    defaults: python
+    description: Source language (python | node).
+  - id: source_code
+    type: STRING
+    required: true
+    description: The code to test (full file contents).
+  - id: filename
+    type: STRING
+    defaults: solution.py
+    description: Suggested filename for the source.
+
+tasks:
+  - id: run_tests
+    type: io.kestra.plugin.scripts.python.Script
+    description: Drop the source into a temp dir, execute it, capture stdout/stderr.
+    taskRunner:
+      type: io.kestra.plugin.core.runner.Process
+    env:
+      LANG: "{{ inputs.language }}"
+      FILENAME: "{{ inputs.filename }}"
+      SOURCE: "{{ inputs.source_code }}"
+    script: |
+      import os, subprocess, sys, tempfile, json, shutil
+
+      lang = os.environ.get("LANG", "python").lower().strip()
+      filename = os.environ.get("FILENAME", "solution.py").strip() or "solution.py"
+      source = os.environ.get("SOURCE", "")
+
+      with tempfile.TemporaryDirectory(prefix="kestra-review-") as tmp:
+          path = os.path.join(tmp, filename)
+          with open(path, "w") as f:
+              f.write(source)
+
+          if lang in {"python", "py"}:
+              cmd = [sys.executable, path]
+          elif lang in {"node", "js", "javascript"}:
+              if not shutil.which("node"):
+                  print(json.dumps({"status": "skipped", "reason": "node not installed in container"}))
+                  sys.exit(0)
+              cmd = ["node", path]
+          else:
+              print(json.dumps({"status": "skipped", "reason": f"unsupported language '{lang}'"}))
+              sys.exit(0)
+
+          try:
+              proc = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+              result = {
+                  "status": "passed" if proc.returncode == 0 else "failed",
+                  "exit_code": proc.returncode,
+                  "stdout": proc.stdout[-2000:],
+                  "stderr": proc.stderr[-2000:],
+              }
+          except subprocess.TimeoutExpired:
+              result = {"status": "failed", "exit_code": -1, "stdout": "", "stderr": "TIMEOUT after 30s"}
+          except Exception as e:
+              result = {"status": "failed", "exit_code": -1, "stdout": "", "stderr": str(e)}
+
+          # Save as Kestra task output via stdout JSON marker
+          with open("/tmp/review_result.json", "w") as f:
+              json.dump(result, f)
+          print(json.dumps(result, indent=2))
+    outputFiles:
+      - "/tmp/review_result.json"
+
+  - id: sync_to_obsidian
+    type: io.kestra.plugin.scripts.python.Script
+    description: Write a markdown note for this Reviewer execution into the Obsidian vault.
+    taskRunner:
+      type: io.kestra.plugin.core.runner.Process
+    env:
+      AGENT: reviewer
+      EXEC_ID: "{{ execution.id }}"
+      GOAL_ID: "{{ labels.copilot_goal_id ?? trigger.executionId ?? execution.id }}"
+      PARENT_ID: "{{ labels.copilot_parent_id ?? trigger.executionId ?? '' }}"
+      LANG: "{{ inputs.language }}"
+      FILENAME: "{{ inputs.filename }}"
+      SOURCE: "{{ inputs.source_code }}"
+    script: |
+      import os, subprocess, sys, json
+      def cap(s, n):
+          return (s or "")[:n]
+      try:
+          with open("/tmp/review_result.json") as f:
+              result = json.load(f)
+      except Exception:
+          result = {"status": "unknown"}
+      summary = f"status={result.get('status')} exit={result.get('exit_code')} stderr={(result.get('stderr') or '')[:200]}"
+      input_blurb = f"lang={os.environ.get('LANG')} file={os.environ.get('FILENAME')}\n---\n{cap(os.environ.get('SOURCE'), 250)}"
+      subprocess.run([
+          sys.executable, "/app/scripts/obsidian_sync.py",
+          "--agent", os.environ.get("AGENT", "reviewer"),
+          "--execution-id", os.environ.get("EXEC_ID", ""),
+          "--goal-id", os.environ.get("GOAL_ID", ""),
+          "--parent-id", os.environ.get("PARENT_ID", ""),
+          "--input", cap(input_blurb, 400),
+          "--output", cap(summary, 800),
+          "--tools-used", "PythonScript",
+          "--children", "",
+          "--status", result.get("status", "completed"),
+      ], check=False)

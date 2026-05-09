@@ -1,0 +1,101 @@
+id: setup
+namespace: hackathon.copilot
+description: One-off — seeds the KV store with API keys read from container environment variables (loaded by docker-compose env_file).
+labels:
+  project: copilot
+  phase: "0"
+
+tasks:
+  - id: set_gemini_api_key
+    type: io.kestra.plugin.core.kv.Set
+    description: Stash GEMINI_API_KEY for the Planner/Coder/Researcher AIAgents.
+    key: GEMINI_API_KEY
+    value: "{{ envs.gemini_api_key | default('') }}"
+    overwrite: true
+
+  - id: set_openrouter_api_key
+    type: io.kestra.plugin.core.kv.Set
+    description: Stash OPENROUTER_API_KEY (alternate LLM provider).
+    key: OPENROUTER_API_KEY
+    value: "{{ envs.openrouter_api_key | default('') }}"
+    overwrite: true
+
+  - id: set_groq_api_key
+    type: io.kestra.plugin.core.kv.Set
+    description: Stash GROQ_API_KEY for the OpenAI-compatible Groq inference endpoint.
+    key: GROQ_API_KEY
+    value: "{{ envs.groq_api_key | default('') }}"
+    overwrite: true
+
+  - id: set_openai_api_key
+    type: io.kestra.plugin.core.kv.Set
+    description: Stash OPENAI_API_KEY (data-sharing program — free quota on gpt-4.1-mini etc).
+    key: OPENAI_API_KEY
+    value: "{{ envs.openai_api_key | default('') }}"
+    overwrite: true
+
+  - id: set_rapid_api_key
+    type: io.kestra.plugin.core.kv.Set
+    description: Stash RAPID_API_KEY for the Coder's Judge0 sandbox.
+    key: RAPID_API_KEY
+    value: "{{ envs.rapid_api_key | default('') }}"
+    overwrite: true
+
+  - id: set_github_token
+    type: io.kestra.plugin.core.kv.Set
+    description: Stash GITHUB_TOKEN so the Communicator can create repos.
+    key: GITHUB_TOKEN
+    value: "{{ envs.github_token | default('') }}"
+    overwrite: true
+
+  - id: set_github_username
+    type: io.kestra.plugin.core.kv.Set
+    description: Stash GITHUB_USERNAME for repo URL construction.
+    key: GITHUB_USERNAME
+    value: "{{ envs.github_username | default('') }}"
+    overwrite: true
+
+  - id: set_slack_webhook
+    type: io.kestra.plugin.core.kv.Set
+    description: Stash SLACK_WEBHOOK_URL so the Communicator can announce.
+    key: SLACK_WEBHOOK_URL
+    value: "{{ envs.slack_webhook_url | default('') }}"
+    overwrite: true
+
+  - id: set_kestra_username
+    type: io.kestra.plugin.core.kv.Set
+    description: Stash Kestra basic-auth username so KestraFlow tools can call back.
+    key: KESTRA_USERNAME
+    value: "{{ envs.kestra_username | default('admin@kestra.local') }}"
+    overwrite: true
+
+  - id: set_kestra_password
+    type: io.kestra.plugin.core.kv.Set
+    description: Stash Kestra basic-auth password so KestraFlow tools can call back.
+    key: KESTRA_PASSWORD
+    value: "{{ envs.kestra_password | default('') }}"
+    overwrite: true
+
+  - id: confirm_log
+    type: io.kestra.plugin.core.log.Log
+    message: "KV seeded for namespace hackathon.copilot. Ready to run the planner."
+
+  - id: sync_to_obsidian
+    type: io.kestra.plugin.scripts.python.Script
+    description: Write a system-setup note into the Obsidian vault so the graph has a 'phase 0' anchor.
+    taskRunner:
+      type: io.kestra.plugin.core.runner.Process
+    script: |
+      import subprocess, sys
+      subprocess.run([
+          sys.executable, "/app/scripts/obsidian_sync.py",
+          "--agent", "system_setup",
+          "--execution-id", "{{ execution.id }}",
+          "--goal-id", "system",
+          "--parent-id", "",
+          "--input", "Phase 0 — seed KV store with API keys (GEMINI / RAPID / GITHUB / SLACK).",
+          "--output", "KV namespace 'hackathon.copilot' populated.",
+          "--tools-used", "kv.Set",
+          "--children", "",
+          "--status", "completed",
+      ], check=False)

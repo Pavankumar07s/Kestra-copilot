@@ -1,0 +1,71 @@
+id: researcher
+namespace: hackathon.copilot
+description: Researcher agent — given a brief, picks a tech stack, key libraries, and writes a one-paragraph rationale.
+labels:
+  project: copilot
+  phase: "2"
+
+inputs:
+  - id: brief
+    type: STRING
+    required: true
+    description: Plain-English brief / problem statement.
+
+tasks:
+  - id: pick_stack
+    type: io.kestra.plugin.ai.agent.AIAgent
+    description: Researcher brain. Picks language, framework, libs, and rationale.
+    provider:
+      type: io.kestra.plugin.ai.provider.GoogleGemini
+      apiKey: "{{ kv('GEMINI_API_KEY') }}"
+      modelName: gemma-4-31b-it
+    systemMessage: |
+      You are a senior staff engineer choosing a tech stack for a hackathon
+      project. You have NO web access — work from your training knowledge.
+
+      Output EXACTLY this format (plain text, no markdown fences):
+
+        LANGUAGE: <python|node|go|...>
+        FRAMEWORK: <e.g. FastAPI, Express, none>
+        DEPENDENCIES:
+        - <pkg1>
+        - <pkg2>
+        - <pkg3>
+        RATIONALE:
+        <one paragraph, max 3 sentences, plain English — why this stack>
+
+      Pick widely-used, well-documented choices. Prefer 3-5 dependencies
+      total, no exotic libs. The Coder downstream will turn this into a
+      working starter.
+    prompt: "{{ inputs.brief }}"
+    # Optional: attach io.kestra.plugin.ai.tool.TavilyWebSearch when TAVILY_API_KEY is set.
+
+  - id: sync_to_obsidian
+    type: io.kestra.plugin.scripts.python.Script
+    description: Write a markdown note for this Researcher execution into the Obsidian vault.
+    taskRunner:
+      type: io.kestra.plugin.core.runner.Process
+    env:
+      AGENT: researcher
+      EXEC_ID: "{{ execution.id }}"
+      GOAL_ID: "{{ labels.copilot_goal_id ?? trigger.executionId ?? execution.id }}"
+      PARENT_ID: "{{ labels.copilot_parent_id ?? trigger.executionId ?? '' }}"
+      TASK_INPUT: "{{ inputs.brief }}"
+      AGENT_OUTPUT: "{{ outputs.pick_stack.textOutput ?? '' }}"
+      TOOLS_USED: "AIAgent"
+    script: |
+      import os, subprocess, sys
+      def cap(s, n):
+          return (s or "")[:n]
+      subprocess.run([
+          sys.executable, "/app/scripts/obsidian_sync.py",
+          "--agent", os.environ.get("AGENT", "researcher"),
+          "--execution-id", os.environ.get("EXEC_ID", ""),
+          "--goal-id", os.environ.get("GOAL_ID", ""),
+          "--parent-id", os.environ.get("PARENT_ID", ""),
+          "--input", cap(os.environ.get("TASK_INPUT"), 300),
+          "--output", cap(os.environ.get("AGENT_OUTPUT"), 800),
+          "--tools-used", os.environ.get("TOOLS_USED", ""),
+          "--children", "",
+          "--status", "completed",
+      ], check=False)

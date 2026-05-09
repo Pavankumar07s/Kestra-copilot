@@ -1,0 +1,53 @@
+# REFERENCE — Claude Code: use this as a template for flows/00_setup.yml.
+# Validate against the live schema with the kestra-flow agent skill before
+# saving the real flows/00_setup.yml.
+#
+# Run this once after `docker-compose up`. It seeds the KV store with secrets
+# from the .env file (passed in via env_file in docker-compose.yml).
+
+id: setup
+namespace: hackathon.copilot
+description: One-off — seeds KV store with API keys from environment variables.
+labels:
+  project: copilot
+  phase: "0"
+
+tasks:
+  - id: set_gemini
+    type: io.kestra.plugin.core.kv.Set
+    namespace: hackathon.copilot
+    key: GEMINI_API_KEY
+    value: "{{ envs.gemini_api_key }}"
+    overwrite: true
+
+  - id: set_rapidapi
+    type: io.kestra.plugin.core.kv.Set
+    namespace: hackathon.copilot
+    key: RAPID_API_KEY
+    value: "{{ envs.rapid_api_key }}"
+    overwrite: true
+
+  - id: set_github_token
+    type: io.kestra.plugin.core.kv.Set
+    namespace: hackathon.copilot
+    key: GITHUB_TOKEN
+    value: "{{ envs.github_token }}"
+    overwrite: true
+
+  - id: set_github_username
+    type: io.kestra.plugin.core.kv.Set
+    namespace: hackathon.copilot
+    key: GITHUB_USERNAME
+    value: "{{ envs.github_username }}"
+    overwrite: true
+
+  - id: set_slack_webhook
+    type: io.kestra.plugin.core.kv.Set
+    namespace: hackathon.copilot
+    key: SLACK_WEBHOOK_URL
+    value: "{{ envs.slack_webhook_url }}"
+    overwrite: true
+
+  - id: confirm
+    type: io.kestra.plugin.core.log.Log
+    message: "KV seeded for namespace hackathon.copilot. Ready to run the planner."

@@ -1,0 +1,169 @@
+id: planner
+namespace: hackathon.copilot
+description: Root agent. Decomposes a hackathon brief and dispatches to four specialist subflows (researcher → coder → reviewer → communicator).
+labels:
+  project: copilot
+  phase: "2"
+
+inputs:
+  - id: goal
+    type: STRING
+    required: true
+    description: The natural-language hackathon brief.
+  - id: goal_id
+    type: STRING
+    defaults: "{{ execution.id }}"
+    description: Stable id for the whole run; ties every execution to one goal note.
+
+tasks:
+  - id: plan_and_route
+    type: io.kestra.plugin.ai.agent.AIAgent
+    description: Planner brain. Decides which specialist to call next based on the brief.
+    allowFailure: true
+    provider:
+      type: io.kestra.plugin.ai.provider.GoogleGemini
+      apiKey: "{{ kv('GEMINI_API_KEY') }}"
+      modelName: gemma-4-31b-it
+    maxSequentialToolsInvocations: 6
+    systemMessage: |
+      You are a hackathon project planner. You drive a team of FOUR specialist
+      agents that run as Kestra subflow executions. Each tool call shows up
+      as a nested execution in the Kestra UI — that visible cascade IS the
+      product. Use every tool at least once.
+
+      Available tools:
+        - call_researcher    — picks language/framework/libs for the brief
+        - call_coder         — writes a self-contained source file from a task description
+        - call_reviewer      — runs the generated code, returns pass/fail
+        - call_communicator  — creates a GitHub repo + posts to Slack
+
+      ABSOLUTE RULE — STRICTLY SEQUENTIAL: Call EXACTLY ONE tool per turn.
+      WAIT for that tool's RESULT. READ the result. THEN decide the next tool.
+      NEVER call multiple tools in the same turn. NEVER fabricate inputs to a
+      later tool that depend on an earlier tool's result — you MUST have the
+      real result in your context first.
+
+      Order (one tool per turn, wait for each):
+        Turn 1: call_researcher(brief=<the user's brief verbatim>)
+                — returns LANGUAGE / FRAMEWORK / DEPENDENCIES / RATIONALE.
+
+        Turn 2: call_coder(task_description=<1-2 sentence rephrase, mention the LANGUAGE>)
+                — returns LANGUAGE / FILENAME / SOURCE / NOTES blocks.
+
+        Turn 3: call_reviewer(
+                  language=<from researcher>,
+                  source_code=<paste the EXACT contents of coder's SOURCE block — never invent>,
+                  filename=<from coder's FILENAME>
+                )
+                — returns a status line.
+
+        Turn 4: call_communicator(
+                  project_name=<slug-friendly version of the brief>,
+                  brief=<the original brief>,
+                  stack_summary=<researcher's full output>,
+                  source_filename=<coder's FILENAME>,
+                  source_code=<the EXACT contents of coder's SOURCE block — never paraphrase>,
+                  review_summary=<reviewer's status line>
+                )
+
+        Turn 5: Reply with a 2-3 sentence summary including the repo URL from
+                communicator. STOP.
+
+      If you ever feel tempted to call two tools in one turn, DO NOT. Pick the
+      first one only. Wait. Then pick the next.
+    prompt: "{{ inputs.goal }}"
+    tools:
+      - type: io.kestra.plugin.ai.tool.KestraFlow
+        namespace: hackathon.copilot
+        flowId: researcher
+        description: "Picks tech stack (language, framework, 3-5 deps) for a brief. Pass the brief verbatim as `brief`."
+        kestraUrl: http://localhost:8080
+        auth:
+          username: "{{ kv('KESTRA_USERNAME') ?? 'admin@kestra.local' }}"
+          password: "{{ kv('KESTRA_PASSWORD') ?? 'Hackathon2026!' }}"
+        inheritLabels: true
+        labels:
+          copilot_goal_id: "{{ inputs.goal_id }}"
+          copilot_parent_id: "{{ execution.id }}"
+
+      - type: io.kestra.plugin.ai.tool.KestraFlow
+        namespace: hackathon.copilot
+        flowId: coder
+        description: "Generates a self-contained source file. Pass `task_description` (one paragraph)."
+        kestraUrl: http://localhost:8080
+        auth:
+          username: "{{ kv('KESTRA_USERNAME') ?? 'admin@kestra.local' }}"
+          password: "{{ kv('KESTRA_PASSWORD') ?? 'Hackathon2026!' }}"
+        inheritLabels: true
+        labels:
+          copilot_goal_id: "{{ inputs.goal_id }}"
+          copilot_parent_id: "{{ execution.id }}"
+
+      - type: io.kestra.plugin.ai.tool.KestraFlow
+        namespace: hackathon.copilot
+        flowId: reviewer
+        description: "Runs the generated code in a sandbox. Pass `language`, `source_code`, `filename`. Returns pass/fail summary."
+        kestraUrl: http://localhost:8080
+        auth:
+          username: "{{ kv('KESTRA_USERNAME') ?? 'admin@kestra.local' }}"
+          password: "{{ kv('KESTRA_PASSWORD') ?? 'Hackathon2026!' }}"
+        inheritLabels: true
+        labels:
+          copilot_goal_id: "{{ inputs.goal_id }}"
+          copilot_parent_id: "{{ execution.id }}"
+
+      - type: io.kestra.plugin.ai.tool.KestraFlow
+        namespace: hackathon.copilot
+        flowId: communicator
+        description: "Creates a GitHub repo with the generated files and posts to Slack. Pass project_name, brief, stack_summary, source_filename, source_code, review_summary."
+        kestraUrl: http://localhost:8080
+        auth:
+          username: "{{ kv('KESTRA_USERNAME') ?? 'admin@kestra.local' }}"
+          password: "{{ kv('KESTRA_PASSWORD') ?? 'Hackathon2026!' }}"
+        inheritLabels: true
+        labels:
+          copilot_goal_id: "{{ inputs.goal_id }}"
+          copilot_parent_id: "{{ execution.id }}"
+
+  - id: sync_to_obsidian
+    type: io.kestra.plugin.scripts.python.Script
+    description: Write a markdown note for the Planner execution + link to all children.
+    taskRunner:
+      type: io.kestra.plugin.core.runner.Process
+    env:
+      AGENT: planner
+      EXEC_ID: "{{ execution.id }}"
+      GOAL_ID: "{{ inputs.goal_id }}"
+      PARENT_ID: "goal:{{ inputs.goal_id }}"
+      GOAL_INPUT: "{{ inputs.goal }}"
+      AGENT_OUTPUT: "{{ outputs.plan_and_route.textOutput ?? '' }}"
+      TOOL_EXECS_JSON: "{{ outputs.plan_and_route.toolExecutions ?? [] | json }}"
+      TOOLS_USED: "KestraFlow"
+    script: |
+      import os, subprocess, sys, json
+      def cap(s, n):
+          return (s or "")[:n]
+      try:
+          tool_execs = json.loads(os.environ.get("TOOL_EXECS_JSON", "[]") or "[]")
+      except Exception:
+          tool_execs = []
+      children = []
+      for te in tool_execs:
+          try:
+              r = json.loads(te.get("result", "{}"))
+              if r.get("id"):
+                  children.append(r["id"])
+          except Exception:
+              continue
+      subprocess.run([
+          sys.executable, "/app/scripts/obsidian_sync.py",
+          "--agent", os.environ.get("AGENT", "planner"),
+          "--execution-id", os.environ.get("EXEC_ID", ""),
+          "--goal-id", os.environ.get("GOAL_ID", ""),
+          "--parent-id", os.environ.get("PARENT_ID", ""),
+          "--input", cap(os.environ.get("GOAL_INPUT"), 300),
+          "--output", cap(os.environ.get("AGENT_OUTPUT"), 800),
+          "--tools-used", os.environ.get("TOOLS_USED", ""),
+          "--children", ",".join(children),
+          "--status", "completed",
+      ], check=False)

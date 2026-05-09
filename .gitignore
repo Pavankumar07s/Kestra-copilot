@@ -1,0 +1,8 @@
+.env
+__pycache__/
+*.pyc
+.DS_Store
+node_modules/
+*.log
+
+# do NOT gitignore the obsidian_seed/ folder — that's part of the project

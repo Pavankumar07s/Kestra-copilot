@@ -1,0 +1,76 @@
+id: coder
+namespace: hackathon.copilot
+description: Coder agent — given a task description, generates source code (and runs it in a Judge0 sandbox if RAPID_API_KEY is set).
+labels:
+  project: copilot
+  phase: "1"
+
+inputs:
+  - id: task_description
+    type: STRING
+    required: true
+    description: Plain-English description of what to build/code/fix.
+
+tasks:
+  - id: generate_and_run
+    type: io.kestra.plugin.ai.agent.AIAgent
+    description: Coder brain. Writes code; if a sandbox tool is wired in (Phase 2+) it also runs it.
+    provider:
+      type: io.kestra.plugin.ai.provider.GoogleGemini
+      apiKey: "{{ kv('GEMINI_API_KEY') }}"
+      modelName: gemma-4-31b-it
+    systemMessage: |
+      You are a senior software engineer working inside a Kestra subflow.
+
+      Your job:
+        1. Read the task_description.
+        2. Choose the simplest viable implementation language (default: Python).
+        3. Write a single self-contained source file that solves it.
+        4. Return your reply in this exact shape (plain text, no markdown fences):
+
+           LANGUAGE: <python|node|...>
+           FILENAME: <suggested filename>
+           SOURCE:
+           <the full source code>
+           ---
+           NOTES:
+           <one-line summary of what was built and how to run/test it>
+
+      Be terse outside SOURCE — no preamble, no explanations. The code IS the
+      answer. If the task is ambiguous, make the simplest reasonable
+      assumption and proceed.
+    prompt: "{{ inputs.task_description }}"
+    # NOTE: CodeExecution tool will be re-attached in Phase 2 once RAPID_API_KEY is set.
+    # tools:
+    #   - type: io.kestra.plugin.ai.tool.CodeExecution
+    #     apiKey: "{{ kv('RAPID_API_KEY') }}"
+
+  - id: sync_to_obsidian
+    type: io.kestra.plugin.scripts.python.Script
+    description: Write a markdown note for this Coder execution into the Obsidian vault.
+    taskRunner:
+      type: io.kestra.plugin.core.runner.Process
+    env:
+      AGENT: coder
+      EXEC_ID: "{{ execution.id }}"
+      GOAL_ID: "{{ labels.copilot_goal_id ?? trigger.executionId ?? execution.id }}"
+      PARENT_ID: "{{ labels.copilot_parent_id ?? trigger.executionId ?? '' }}"
+      TASK_INPUT: "{{ inputs.task_description }}"
+      AGENT_OUTPUT: "{{ outputs.generate_and_run.textOutput ?? '' }}"
+      TOOLS_USED: "AIAgent"
+    script: |
+      import os, subprocess, sys
+      def cap(s, n):
+          return (s or "")[:n]
+      subprocess.run([
+          sys.executable, "/app/scripts/obsidian_sync.py",
+          "--agent", os.environ.get("AGENT", "coder"),
+          "--execution-id", os.environ.get("EXEC_ID", ""),
+          "--goal-id", os.environ.get("GOAL_ID", ""),
+          "--parent-id", os.environ.get("PARENT_ID", ""),
+          "--input", cap(os.environ.get("TASK_INPUT"), 300),
+          "--output", cap(os.environ.get("AGENT_OUTPUT"), 800),
+          "--tools-used", os.environ.get("TOOLS_USED", ""),
+          "--children", "",
+          "--status", "completed",
+      ], check=False)

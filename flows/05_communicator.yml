@@ -1,0 +1,197 @@
+id: communicator
+namespace: hackathon.copilot
+description: Communicator agent — creates a GitHub repo with the generated files, pushes a README, and posts an announcement to Slack.
+labels:
+  project: copilot
+  phase: "2"
+
+inputs:
+  - id: project_name
+    type: STRING
+    required: true
+    description: Slug-friendly repo name (lowercase, hyphenated).
+  - id: brief
+    type: STRING
+    required: true
+    description: Plain-English original brief, used in README.
+  - id: stack_summary
+    type: STRING
+    defaults: ""
+    description: One paragraph from the Researcher (LANGUAGE/FRAMEWORK/DEPENDENCIES/RATIONALE block).
+  - id: source_filename
+    type: STRING
+    defaults: solution.py
+  - id: source_code
+    type: STRING
+    required: true
+    description: Main source file contents from the Coder.
+  - id: review_summary
+    type: STRING
+    defaults: "(no review)"
+    description: One-line summary from the Reviewer (status + exit code).
+
+tasks:
+  - id: publish_and_announce
+    type: io.kestra.plugin.scripts.python.Script
+    description: Create GitHub repo, push files, post to Slack. All-or-nothing per side, but we keep going on partial failures so the Obsidian note still records what happened.
+    taskRunner:
+      type: io.kestra.plugin.core.runner.Process
+    env:
+      GITHUB_TOKEN: "{{ kv('GITHUB_TOKEN') ?? '' }}"
+      GITHUB_USERNAME: "{{ kv('GITHUB_USERNAME') ?? '' }}"
+      SLACK_WEBHOOK_URL: "{{ kv('SLACK_WEBHOOK_URL') ?? '' }}"
+      PROJECT_NAME: "{{ inputs.project_name }}"
+      BRIEF: "{{ inputs.brief }}"
+      STACK: "{{ inputs.stack_summary }}"
+      FILENAME: "{{ inputs.source_filename }}"
+      SOURCE: "{{ inputs.source_code }}"
+      REVIEW: "{{ inputs.review_summary }}"
+    script: |
+      import os, json, base64, urllib.request, urllib.error, sys, re
+
+      gh_token = os.environ.get("GITHUB_TOKEN", "").strip()
+      gh_user  = os.environ.get("GITHUB_USERNAME", "").strip()
+      slack    = os.environ.get("SLACK_WEBHOOK_URL", "").strip()
+      project  = re.sub(r'[^a-z0-9-]', '-', os.environ.get("PROJECT_NAME", "").lower())[:60].strip('-') or "kestra-copilot-demo"
+      brief    = os.environ.get("BRIEF", "")
+      stack    = os.environ.get("STACK", "")
+      fname    = os.environ.get("FILENAME", "solution.py").strip() or "solution.py"
+      source   = os.environ.get("SOURCE", "")
+      review   = os.environ.get("REVIEW", "(no review)")
+
+      result = {"project": project, "repo_url": "", "github": None, "slack": None}
+
+      def gh_request(method, url, payload=None):
+          data = None if payload is None else json.dumps(payload).encode()
+          req = urllib.request.Request(url, data=data, method=method, headers={
+              "Authorization": f"Bearer {gh_token}",
+              "Accept": "application/vnd.github+json",
+              "Content-Type": "application/json",
+              "User-Agent": "kestra-copilot",
+          })
+          try:
+              with urllib.request.urlopen(req, timeout=15) as r:
+                  return r.status, json.loads(r.read() or b'{}')
+          except urllib.error.HTTPError as e:
+              return e.code, {"error": e.read().decode()[:300]}
+          except Exception as e:
+              return None, {"error": str(e)}
+
+      # 1. Create repo (idempotent: 422 = already exists, treat as OK)
+      if gh_token and gh_user:
+          status, body = gh_request("POST", "https://api.github.com/user/repos",
+              {"name": project, "description": brief[:200], "private": False, "auto_init": True})
+          if status in (201, 422):
+              result["repo_url"] = f"https://github.com/{gh_user}/{project}"
+              # Parse the researcher's stack output into structured markdown.
+              def _stack_md(raw: str) -> str:
+                  if not raw or "LANGUAGE" not in raw:
+                      return raw or "_(stack rationale not provided)_"
+                  out = {"language": "", "framework": "", "deps": [], "rationale": ""}
+                  cur = None
+                  for line in raw.splitlines():
+                      s = line.strip()
+                      if s.upper().startswith("LANGUAGE:"):    out["language"] = s.split(":",1)[1].strip(); cur=None
+                      elif s.upper().startswith("FRAMEWORK:"): out["framework"] = s.split(":",1)[1].strip(); cur=None
+                      elif s.upper().startswith("DEPENDENCIES"): cur = "deps"
+                      elif s.upper().startswith("RATIONALE"):  cur = "rationale"
+                      elif cur == "deps" and s.startswith(("-", "*")): out["deps"].append(s.lstrip("-* ").strip())
+                      elif cur == "rationale" and s: out["rationale"] += (" " + s) if out["rationale"] else s
+                  parts = []
+                  if out["language"]:  parts.append(f"- **Language:** {out['language']}")
+                  if out["framework"]: parts.append(f"- **Framework:** {out['framework']}")
+                  if out["deps"]:      parts.append("- **Dependencies:**\n  - " + "\n  - ".join(out["deps"]))
+                  if out["rationale"]: parts.append(f"\n{out['rationale'].strip()}")
+                  return "\n".join(parts)
+              # 2. Push README + source
+              readme = (
+                  f"# {project}\n\n"
+                  f"> {brief}\n\n"
+                  f"## Stack\n\n{_stack_md(stack)}\n\n"
+                  f"## Files\n\n- [`{fname}`]({fname}) — main source\n\n"
+                  f"## Review\n\n`{review}`\n\n"
+                  f"---\n\n"
+                  f"🤖 _Generated by [Kestra Hackathon Co-Pilot](https://github.com/Pavankumar07s/kestra-copilot) — "
+                  f"a multi-agent Kestra workflow that turns a natural-language brief into a working starter project. "
+                  f"Brief → Researcher → Coder → Reviewer → Communicator, dispatched dynamically by an LLM._\n"
+              )
+              for path, content in [("README.md", readme), (fname, source)]:
+                  s, b = gh_request("PUT", f"https://api.github.com/repos/{gh_user}/{project}/contents/{path}",
+                      {"message": f"feat: add {path} (kestra co-pilot)",
+                       "content": base64.b64encode(content.encode()).decode()})
+                  if s not in (200, 201):
+                      # File might already exist from previous run; try to update
+                      get_s, get_b = gh_request("GET", f"https://api.github.com/repos/{gh_user}/{project}/contents/{path}")
+                      sha = get_b.get("sha") if isinstance(get_b, dict) else None
+                      if sha:
+                          gh_request("PUT", f"https://api.github.com/repos/{gh_user}/{project}/contents/{path}",
+                              {"message": f"chore: refresh {path}",
+                               "content": base64.b64encode(content.encode()).decode(),
+                               "sha": sha})
+              result["github"] = {"status": "ok", "url": result["repo_url"]}
+          else:
+              result["github"] = {"status": "failed", "code": status, "body": body}
+      else:
+          result["github"] = {"status": "skipped", "reason": "GITHUB_TOKEN or GITHUB_USERNAME missing"}
+
+      # 3. Slack announce
+      if slack:
+          msg = f":robot_face: *Kestra Co-Pilot* shipped a new starter:\n> {brief}\n*Repo:* {result.get('repo_url') or '(not created)'}\n*Review:* {review}"
+          try:
+              req = urllib.request.Request(slack, data=json.dumps({"text": msg}).encode(),
+                  method="POST", headers={"Content-Type": "application/json"})
+              with urllib.request.urlopen(req, timeout=10) as r:
+                  result["slack"] = {"status": "ok", "code": r.status}
+          except Exception as e:
+              result["slack"] = {"status": "failed", "error": str(e)[:200]}
+      else:
+          result["slack"] = {"status": "skipped", "reason": "SLACK_WEBHOOK_URL missing"}
+
+      print(json.dumps(result, indent=2))
+      with open("/tmp/communicator_result.json", "w") as f:
+          json.dump(result, f)
+    outputFiles:
+      - "/tmp/communicator_result.json"
+
+  - id: sync_to_obsidian
+    type: io.kestra.plugin.scripts.python.Script
+    description: Write a markdown note for this Communicator execution + a 'final report' note linked to the goal.
+    taskRunner:
+      type: io.kestra.plugin.core.runner.Process
+    env:
+      AGENT: communicator
+      EXEC_ID: "{{ execution.id }}"
+      GOAL_ID: "{{ labels.copilot_goal_id ?? trigger.executionId ?? execution.id }}"
+      PARENT_ID: "{{ labels.copilot_parent_id ?? trigger.executionId ?? '' }}"
+      BRIEF: "{{ inputs.brief }}"
+      REVIEW: "{{ inputs.review_summary }}"
+      FILENAME: "{{ inputs.source_filename }}"
+    script: |
+      import os, subprocess, sys, json
+      def cap(s, n):
+          return (s or "")[:n]
+      try:
+          with open("/tmp/communicator_result.json") as f:
+              result = json.load(f)
+      except Exception:
+          result = {}
+      gh = result.get("github", {})
+      sl = result.get("slack", {})
+      summary = f"repo={result.get('repo_url') or '(none)'} | github={gh.get('status')} | slack={sl.get('status')}"
+      subprocess.run([
+          sys.executable, "/app/scripts/obsidian_sync.py",
+          "--agent", os.environ.get("AGENT", "communicator"),
+          "--execution-id", os.environ.get("EXEC_ID", ""),
+          "--goal-id", os.environ.get("GOAL_ID", ""),
+          "--parent-id", os.environ.get("PARENT_ID", ""),
+          "--input", cap(os.environ.get("BRIEF"), 300),
+          "--output", cap(summary, 800),
+          "--tools-used", "GitHubAPI,SlackWebhook",
+          "--children", "",
+          "--status", "completed" if gh.get("status") in ("ok", "skipped") else "failed",
+          "--report",
+          "--repo-url", result.get("repo_url", "") or "",
+          "--slack-status", str(sl.get("status", "")),
+          "--review-status", os.environ.get("REVIEW", ""),
+          "--source-filename", os.environ.get("FILENAME", ""),
+      ], check=False)

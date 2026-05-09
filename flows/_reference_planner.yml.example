@@ -1,0 +1,114 @@
+# REFERENCE — Claude Code: use this as a template for flows/01_planner.yml.
+# This file is intentionally suffixed .example so Kestra does not auto-load it.
+# Validate against the live schema with the kestra-flow agent skill before
+# saving the real flows/01_planner.yml.
+
+id: planner
+namespace: hackathon.copilot
+description: Root agent. Decomposes a hackathon brief and routes to specialist subflows dynamically.
+labels:
+  project: copilot
+  phase: "1"
+
+inputs:
+  - id: goal
+    type: STRING
+    required: true
+    description: The natural-language hackathon brief.
+  - id: goal_id
+    type: STRING
+    defaults: "{{ execution.id }}"
+    description: Stable id for the whole run; ties every execution to one goal note.
+
+tasks:
+  - id: plan_and_route
+    type: io.kestra.plugin.ai.agent.AIAgent
+    description: The planner brain. Decides which specialist to call next based on the brief.
+    provider:
+      type: io.kestra.plugin.ai.provider.GoogleGemini
+      apiKey: "{{ kv('GEMINI_API_KEY') }}"
+      modelName: gemini-2.5-flash
+    systemMessage: |
+      You are a hackathon project planner. Your job is to drive a team of four
+      specialist subflow agents to deliver a working starter project from a
+      natural-language brief.
+
+      You have FOUR tools, all of which run as Kestra subflow executions:
+        - call_researcher    — picks the stack, finds libs, checks docs
+        - call_coder         — generates code and runs it in a sandbox
+        - call_reviewer      — runs tests and lint on generated code
+        - call_communicator  — creates the GitHub repo and posts to Slack
+
+      RULES (follow exactly):
+        1. ALWAYS call call_researcher FIRST. Pass the brief verbatim.
+        2. Then call call_coder ONCE per code artifact you need.
+        3. After each call_coder, call call_reviewer with the generated code.
+        4. If reviewer reports failures, call call_coder again with the failure
+           details. Do not loop more than 3 times per artifact.
+        5. END by calling call_communicator EXACTLY ONCE with all generated
+           code, the chosen stack, and a one-line announcement message.
+
+      Be terse with tool inputs — one paragraph max. Never paste large code
+      blocks into tool args; the coder will keep its own state.
+    prompt: "{{ inputs.goal }}"
+    tools:
+      - type: io.kestra.plugin.ai.tool.KestraFlow
+        namespace: hackathon.copilot
+        flowId: researcher
+        description: "Picks tech stack, finds libraries, checks docs. Call FIRST."
+      - type: io.kestra.plugin.ai.tool.KestraFlow
+        namespace: hackathon.copilot
+        flowId: coder
+        description: "Generates code and runs it in a Judge0 sandbox. Returns the generated source."
+      - type: io.kestra.plugin.ai.tool.KestraFlow
+        namespace: hackathon.copilot
+        flowId: reviewer
+        description: "Runs tests and lint. Returns pass/fail with detailed feedback."
+      - type: io.kestra.plugin.ai.tool.KestraFlow
+        namespace: hackathon.copilot
+        flowId: communicator
+        description: "Creates the GitHub repo with the final files and announces on Slack. Call LAST."
+
+  - id: sync_to_obsidian
+    type: io.kestra.plugin.scripts.python.Script
+    description: Write the planner's execution as a markdown note in the Obsidian vault.
+    runner: PROCESS
+    script: |
+      import subprocess, sys, json
+      # Pull the children (subflow execution ids) the AIAgent spawned.
+      tool_executions_json = """{{ outputs.plan_and_route.toolExecutions | default([]) | json }}"""
+      try:
+          tool_execs = json.loads(tool_executions_json) if tool_executions_json.strip() else []
+      except Exception:
+          tool_execs = []
+      children = []
+      for te in tool_execs:
+          # toolExecutions[].result is a JSON string with {tenantId, flowId, id, ...}
+          try:
+              r = json.loads(te.get("result", "{}"))
+              if r.get("id"):
+                  children.append(r["id"])
+          except Exception:
+              continue
+
+      subprocess.run([
+          sys.executable, "/app/scripts/obsidian_sync.py",
+          "--agent", "planner",
+          "--execution-id", "{{ execution.id }}",
+          "--goal-id", "{{ inputs.goal_id }}",
+          "--parent-id", "goal:{{ inputs.goal_id }}",
+          "--input", """{{ inputs.goal | replace({'"': "'"}) }}""",
+          "--output", """{{ outputs.plan_and_route.completion | default('') | replace({'"': "'"}) }}""",
+          "--tools-used", "KestraFlow",
+          "--children", ",".join(children),
+          "--status", "completed",
+      ], check=False)
+
+# Trigger options:
+# 1. Manual from Kestra UI.
+# 2. CLI:  kestractl executions run hackathon.copilot planner --inputs goal="..."
+# 3. Webhook (uncomment below):
+# triggers:
+#   - id: webhook
+#     type: io.kestra.plugin.core.trigger.Webhook
+#     key: copilot-go
