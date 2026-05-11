@@ -5,7 +5,7 @@ services:
     environment:
       POSTGRES_DB: kestra
       POSTGRES_USER: kestra
-      POSTGRES_PASSWORD: kestra
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-kestra}
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
@@ -25,20 +25,20 @@ services:
       # Override these in .env if you want.
       KESTRA_SECURITY_BASIC_AUTH_ENABLED: "true"
       KESTRA_SECURITY_BASIC_AUTH_USERNAME: "admin@kestra.local"
-      KESTRA_SECURITY_BASIC_AUTH_PASSWORD: "Hackathon2026!"
+      KESTRA_SECURITY_BASIC_AUTH_PASSWORD: ${KESTRA_SECURITY_BASIC_AUTH_PASSWORD:-kestra}
       KESTRA_CONFIGURATION: |
         datasources:
           postgres:
             url: jdbc:postgresql://postgres:5432/kestra
             driverClassName: org.postgresql.Driver
             username: kestra
-            password: kestra
+            password: ${POSTGRES_PASSWORD:-kestra}
         kestra:
           security:
             basic-auth:
               enabled: true
               username: admin@kestra.local
-              password: Hackathon2026!
+              password: ${KESTRA_SECURITY_BASIC_AUTH_PASSWORD:-kestra}
           repository:
             type: postgres
           storage:
