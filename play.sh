@@ -15,10 +15,16 @@ cd "$(dirname "$0")"
 # ── Config (override with env if you want) ──────────────────────────
 KESTRA_URL="${KESTRA_URL:-http://localhost:18080}"
 KESTRA_USER="${KESTRA_USER:-admin@kestra.local}"
-KESTRA_PASS="${KESTRA_PASS:-Hackathon2026!}"
+KESTRA_PASS="${KESTRA_PASS:-}"
 NAMESPACE="${NAMESPACE:-hackathon.copilot}"
 DEFAULT_BRIEF="Build a real-time collaborative whiteboard with WebSockets and Postgres"
-VAULT_DIR="${OBSIDIAN_VAULT_PATH:-/home/pavan/Documents/KestraCoPilotVault}/kestra-copilot"
+VAULT_DIR="${OBSIDIAN_VAULT_PATH:-./obsidian_seed}/kestra-copilot"
+
+# Validate that KESTRA_PASS is set (from .env or environment)
+if [[ -z "$KESTRA_PASS" ]]; then
+  echo "✗ Error: KESTRA_PASS is not set. Please set it in your .env file or environment."
+  exit 1
+fi
 
 WARMUP=0
 OPEN=0
